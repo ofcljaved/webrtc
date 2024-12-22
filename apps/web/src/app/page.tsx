@@ -1,9 +1,9 @@
 'use client'
 import { useWebSocket } from "@/contexts/wsContext";
-import { type } from "os";
 import { useEffect, useRef } from "react";
 
 const ROOM_ID = "123";
+
 export default function Home() {
     const localVideoRef = useRef<HTMLVideoElement>(null);
     const remoteVideoRef = useRef<HTMLVideoElement>(null);
@@ -22,6 +22,21 @@ export default function Home() {
         return socket;
     }
 
+    async function createAndSendOffer() {
+        const peerConnection = peerConnectionRef.current;
+        if (!peerConnection) return;
+        const safeSocket = ensureSocket();
+
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+
+        safeSocket.send(JSON.stringify({
+            type: "offer",
+            offer,
+            roomId: ROOM_ID,
+        }));
+    }
+
     function handleJoin() {
         const safeSocket = ensureSocket();
         safeSocket.send(JSON.stringify({ type: "join", roomId: ROOM_ID }));
@@ -32,9 +47,17 @@ export default function Home() {
             }]
         });
 
-        localStream.current?.getTracks().forEach((track) => {
-            peerConnection.addTrack(track, localStream.current!);
-        });
+        peerConnection.onicecandidate = (event) => {
+            if (event.candidate) {
+                safeSocket.send(
+                    JSON.stringify({
+                        type: "ice-candidate",
+                        candidate: event.candidate,
+                        roomId: ROOM_ID,
+                    })
+                );
+            }
+        };
 
         peerConnection.ontrack = (event) => {
             const remoteVideo = remoteVideoRef.current;
@@ -43,16 +66,12 @@ export default function Home() {
             }
         };
 
-        peerConnection.onicecandidate = (event) => {
-            if (event.candidate) {
-                safeSocket.send(JSON.stringify({
-                    type: "ice-candidate",
-                    candidate: event.candidate,
-                    roomId: ROOM_ID,
-                }));
-            }
-        };
+        localStream.current?.getTracks().forEach((track) => {
+            peerConnection.addTrack(track, localStream.current!);
+        });
+
         peerConnectionRef.current = peerConnection;
+        createAndSendOffer();
     }
 
     function handleLeave() {
@@ -64,12 +83,10 @@ export default function Home() {
     }
 
     useEffect(() => {
-        if (!socket) {
-            return;
-        }
+        if (!socket) return;
+
         socket.onmessage = async (event) => {
-            console.log("message", event.data);
-            const message = JSON.parse(event.data.toString());
+            const message = JSON.parse(event.data);
             const peerConnection = peerConnectionRef.current;
 
             if (!peerConnection) return;
@@ -81,12 +98,13 @@ export default function Home() {
                 const answer = await peerConnection.createAnswer();
                 await peerConnection.setLocalDescription(answer);
 
-                const safeSocket = ensureSocket();
-                safeSocket.send(JSON.stringify({
-                    type: "answer",
-                    answer,
-                    roomId: ROOM_ID,
-                }));
+                socket.send(
+                    JSON.stringify({
+                        type: "answer",
+                        answer,
+                        roomId: ROOM_ID,
+                    })
+                );
             }
             else if (message.type === "answer") {
                 await peerConnection.setRemoteDescription(
@@ -106,28 +124,26 @@ export default function Home() {
                 console.log("user connected");
             }
         };
-    }, [socket, ensureSocket]);
+    }, [socket]);
 
     function addStreamToVideo(video: HTMLVideoElement, stream: MediaStream) {
+        localStream.current = stream;
         video.srcObject = stream;
-        video.addEventListener("loadedmetadata", () => {
-            video.play();
-        });
     }
 
     useEffect(() => {
         if (!localVideoRef.current) {
             return;
         }
-        window.navigator.mediaDevices.getUserMedia({
-            video: true,
-            audio: true,
-        }).then((stream) => {
-            addStreamToVideo(localVideoRef.current!, stream);
-        }).catch((err) => {
-            console.error("error", err);
-        })
+        window.navigator.mediaDevices
+            .getUserMedia({ video: true, audio: true, })
+            .then((stream) => {
+                addStreamToVideo(localVideoRef.current!, stream);
+            }).catch((err) => {
+                console.error("error", err);
+            })
     }, []);
+
     return (
         <div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
@@ -145,8 +161,8 @@ export default function Home() {
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))", justifyItems: "center", gap: "10px" }}>
                 <video
                     ref={localVideoRef}
-                    autoPlay
-                    muted
+                    autoPlay={true}
+                    muted={true}
                     style={{
                         width: 400,
                         aspectRatio: 16 / 9,
